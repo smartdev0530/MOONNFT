@@ -45,7 +45,7 @@ interface IMedia {
     /**
      * @notice Mint new media for msg.sender.
      */
-    function mint(MediaData calldata data, IMarket.BidShares calldata bidShares)
+    function mint(MediaData calldata data)
         external;
 
     /**
@@ -68,7 +68,7 @@ interface IMedia {
     /**
      * @notice Set the ask on a piece of media
      */
-    function setAsk(uint256 tokenId, IMarket.Ask calldata ask) external;
+    function setAsk(uint256 tokenId, uint256 ask) external;
 
     /**
      * @notice Remove the ask on a piece of media
@@ -78,7 +78,7 @@ interface IMedia {
     /**
      * @notice Set the bid on a piece of media
      */
-    function setBid(uint256 tokenId, IMarket.Bid calldata bid) external;
+    function setBid(uint256 tokenId, IMarket.Bid calldata bid)  payable external;
 
     /**
      * @notice Remove the bid on a piece of media
@@ -96,6 +96,9 @@ interface IMedia {
      * @notice Update the token URI
      */
     function updateTokenURI(uint256 tokenId, string calldata tokenURI) external;
+
+    // get token count
+    function getTokenCount() external view returns(uint256);
 
     /**
      * @notice Update the token metadata uri

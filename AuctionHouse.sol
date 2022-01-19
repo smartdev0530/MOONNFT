@@ -3,15 +3,16 @@
 pragma solidity 0.6.8;
 pragma experimental ABIEncoderV2;
 
-import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
-import { IERC721, IERC165 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
-import {Counters} from "@openzeppelin/contracts/utils/Counters.sol";
-import { IMarket, Decimal } from "@zoralabs/core/dist/contracts/interfaces/IMarket.sol";
-import { IMedia } from "@zoralabs/core/dist/contracts/interfaces/IMedia.sol";
-import { IAuctionHouse } from "./interfaces/IAuctionHouse.sol";
+import { SafeMath } from "@openzeppelin/contracts@3.2.0/math/SafeMath.sol";
+import { IERC721, IERC165 } from "@openzeppelin/contracts@3.2.0/token/ERC721/IERC721.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts@3.2.0/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts@3.2.0/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts@3.2.0/token/ERC20/SafeERC20.sol";
+import {Counters} from "@openzeppelin/contracts@3.2.0/utils/Counters.sol";
+import { IMedia } from "./IMedia.sol";
+import {IMarket} from "./IMarket.sol";
+import {Decimal} from "./Decimal.sol";
+import { IAuctionHouse } from "./IAuctionHouse.sol";
 
 interface IWETH {
     function deposit() external payable;
@@ -318,6 +319,17 @@ contract AuctionHouse is IAuctionHouse, ReentrancyGuard {
         _cancelAuction(auctionId);
     }
 
+    // Get all auctions
+
+    function getAllAuction() public view returns (IAuctionHouse.Auction[] memory) {
+        uint256 auctionCount = _auctionIdTracker.current();
+        IAuctionHouse.Auction[] memory result = new IAuctionHouse.Auction[](auctionCount);        
+        for (uint i = 0; i < auctionCount; i++) {
+            result[i] = auctions[i];
+        }
+        return result;
+    }
+
     /**
      * @dev Given an amount and a currency, transfer the currency to this contract.
      * If the currency is ETH (0x0), attempt to wrap the amount as WETH
@@ -382,7 +394,7 @@ contract AuctionHouse is IAuctionHouse, ReentrancyGuard {
 
         IMarket.Bid memory bid = IMarket.Bid({
             amount: auctions[auctionId].amount,
-            currency: currency,
+            // currency: currency,
             bidder: address(this),
             recipient: auctions[auctionId].bidder,
             sellOnShare: Decimal.D256(0)

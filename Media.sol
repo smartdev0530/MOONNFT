@@ -1,84 +1,50 @@
 // SPDX-License-Identifier: GPL-3.0
+
 pragma solidity 0.6.8;
 pragma experimental ABIEncoderV2;
 
-import {ERC721Burnable} from "./ERC721Burnable.sol";
-import {ERC721} from "./ERC721.sol";
-import {EnumerableSet} from "@openzeppelin/contracts/utils/EnumerableSet.sol";
-import {Counters} from "@openzeppelin/contracts/utils/Counters.sol";
-import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
-import {Math} from "@openzeppelin/contracts/math/Math.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {
-    ReentrancyGuard
-} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts@3.2.0/introspection/IERC165.sol";
+import "@openzeppelin/contracts@3.2.0/utils/Address.sol";
+import {SafeMath} from "@openzeppelin/contracts@3.2.0/math/SafeMath.sol";
+import {IERC721} from "@openzeppelin/contracts@3.2.0/token/ERC721/IERC721.sol";
+import {IERC20} from "@openzeppelin/contracts@3.2.0/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts@3.2.0/token/ERC20/SafeERC20.sol";
 import {Decimal} from "./Decimal.sol";
-import {IMarket} from "./interfaces/IMarket.sol";
-import "./interfaces/IMedia.sol";
+import {Media} from "./Media.sol";
+import {IMarket} from "./IMarket.sol";
 
 /**
- * @title A media value system, with perpetual equity to creators
- * @notice This contract provides an interface to mint media with a market
- * owned by the creator.
+ * @title A Market for pieces of media
+ * @notice This contract contains all of the market logic for Media
  */
-contract Media is IMedia, ERC721Burnable, ReentrancyGuard {
-    using Counters for Counters.Counter;
+contract Market is IMarket {
     using SafeMath for uint256;
+    using SafeERC20 for IERC20;
 
     /* *******
      * Globals
      * *******
      */
+    // Address of the media contract that can call this market
+    address public mediaContract;
 
-    // Address for the market
-    address public marketContract;
+    // Deployment Address
+    address private _owner;
 
-    // Mapping from token to previous owner of the token
-    mapping(uint256 => address) public previousTokenOwners;
+    // Mapping from token to mapping from bidder to bid
+    mapping(uint256 => mapping(address => Bid)) private _tokenBidders;
 
-    // Mapping from token id to creator address
-    mapping(uint256 => address) public tokenCreators;
+    // // Mapping from token to the bid shares for the token
+    mapping(uint256 => BidShares) private _bidShares;
 
-    // Mapping from creator address to their (enumerable) set of created tokens
-    mapping(address => EnumerableSet.UintSet) private _creatorTokens;
+    // Mapping from token to the current ask for the token
+    mapping(uint256 => uint256) private _tokenAsks;
 
-    // Mapping from token id to sha256 hash of content
-    mapping(uint256 => bytes32) public tokenContentHashes;
-
-    // Mapping from token id to sha256 hash of metadata
-    mapping(uint256 => bytes32) public tokenMetadataHashes;
-
-    // Mapping from token id to metadataURI
-    mapping(uint256 => string) private _tokenMetadataURIs;
-
-    // Mapping from contentHash to bool
-    mapping(bytes32 => bool) private _contentHashes;
-
-    //keccak256("Permit(address spender,uint256 tokenId,uint256 nonce,uint256 deadline)");
-    bytes32 public constant PERMIT_TYPEHASH =
-        0x49ecf333e5b8c95c40fdafc95c1ad136e8914a8fb55e9dc8bb01eaa83a2df9ad;
-
-    //keccak256("MintWithSig(bytes32 contentHash,bytes32 metadataHash,uint256 creatorShare,uint256 nonce,uint256 deadline)");
-    bytes32 public constant MINT_WITH_SIG_TYPEHASH =
-        0x2952e482b8e2b192305f87374d7af45dc2eafafe4f50d26a0c02e90f2fdbe14b;
-
-    // Mapping from address to token id to permit nonce
-    mapping(address => mapping(uint256 => uint256)) public permitNonces;
-
-    // Mapping from address to mint with sig nonce
-    mapping(address => uint256) public mintWithSigNonces;
-
-    /*
-     *     bytes4(keccak256('name()')) == 0x06fdde03
-     *     bytes4(keccak256('symbol()')) == 0x95d89b41
-     *     bytes4(keccak256('tokenURI(uint256)')) == 0xc87b56dd
-     *     bytes4(keccak256('tokenMetadataURI(uint256)')) == 0x157c3df9
-     *
-     *     => 0x06fdde03 ^ 0x95d89b41 ^ 0xc87b56dd ^ 0x157c3df9 == 0x4e222e66
-     */
-    bytes4 private constant _INTERFACE_ID_ERC721_METADATA = 0x4e222e66;
-
-    Counters.Counter private _tokenIdTracker;
+    struct TokenAskInfo {
+        uint256 tokenId;
+        uint256 askValue; 
+        address tokenOwner;
+    }
 
     /* *********
      * Modifiers
@@ -86,498 +52,342 @@ contract Media is IMedia, ERC721Burnable, ReentrancyGuard {
      */
 
     /**
-     * @notice Require that the token has not been burned and has been minted
+     * @notice require that the msg.sender is the configured media contract
      */
-    modifier onlyExistingToken(uint256 tokenId) {
-        require(_exists(tokenId), "Media: nonexistent token");
+    modifier onlyMediaCaller() {
+        require(mediaContract == msg.sender, "Market: Only media contract");
         _;
-    }
-
-    /**
-     * @notice Require that the token has had a content hash set
-     */
-    modifier onlyTokenWithContentHash(uint256 tokenId) {
-        require(
-            tokenContentHashes[tokenId] != 0,
-            "Media: token does not have hash of created content"
-        );
-        _;
-    }
-
-    /**
-     * @notice Require that the token has had a metadata hash set
-     */
-    modifier onlyTokenWithMetadataHash(uint256 tokenId) {
-        require(
-            tokenMetadataHashes[tokenId] != 0,
-            "Media: token does not have hash of its metadata"
-        );
-        _;
-    }
-
-    /**
-     * @notice Ensure that the provided spender is the approved or the owner of
-     * the media for the specified tokenId
-     */
-    modifier onlyApprovedOrOwner(address spender, uint256 tokenId) {
-        require(
-            _isApprovedOrOwner(spender, tokenId),
-            "Media: Only approved or owner"
-        );
-        _;
-    }
-
-    /**
-     * @notice Ensure the token has been created (even if it has been burned)
-     */
-    modifier onlyTokenCreated(uint256 tokenId) {
-        require(
-            _tokenIdTracker.current() > tokenId,
-            "Media: token with that id does not exist"
-        );
-        _;
-    }
-
-    /**
-     * @notice Ensure that the provided URI is not empty
-     */
-    modifier onlyValidURI(string memory uri) {
-        require(
-            bytes(uri).length != 0,
-            "Media: specified uri must be non-empty"
-        );
-        _;
-    }
-
-    /**
-     * @notice On deployment, set the market contract address and register the
-     * ERC721 metadata interface
-     */
-    constructor(address marketContractAddr) public ERC721("Moon", "MOON") {
-        marketContract = marketContractAddr;
-        _registerInterface(_INTERFACE_ID_ERC721_METADATA);
-    }
-
-    /* **************
-     * View Functions
-     * **************
-     */
-
-    /**
-     * @notice return the URI for a particular piece of media with the specified tokenId
-     * @dev This function is an override of the base OZ implementation because we
-     * will return the tokenURI even if the media has been burned. In addition, this
-     * protocol does not support a base URI, so relevant conditionals are removed.
-     * @return the URI for a token
-     */
-    function tokenURI(uint256 tokenId)
-        public
-        view
-        override
-        onlyTokenCreated(tokenId)
-        returns (string memory)
-    {
-        string memory _tokenURI = _tokenURIs[tokenId];
-
-        return _tokenURI;
-    }
-
-    /**
-     * @notice Return the metadata URI for a piece of media given the token URI
-     * @return the metadata URI for the token
-     */
-    function tokenMetadataURI(uint256 tokenId)
-        external
-        view
-        override
-        onlyTokenCreated(tokenId)
-        returns (string memory)
-    {
-        return _tokenMetadataURIs[tokenId];
     }
 
     /* ****************
-     * Public Functions
+     * View Functions
      * ****************
      */
-
-    /**
-     * @notice see IMedia
-     */
-    function mint(MediaData memory data)
-        public
+    function bidForTokenBidder(uint256 tokenId, address bidder)
+        external
+        view
         override
-        nonReentrant
+        returns (Bid memory)
     {
-        IMarket.BidShares memory bidShares = {
-            prevOwner : Decimal.D256(0), 
-            creator : Decimal.D256( uint256(10).mul(Decimal.BASE)), 
-            owner : Decimal.D256(uint256(90).mul(Decimal.BASE))
-        };
-        _mintForCreator(msg.sender, data, bidShares);
+        return _tokenBidders[tokenId][bidder];
+    }
+
+    function currentAskForToken(uint256 tokenId)
+        external
+        view
+        override
+        returns (uint256 )
+    {
+        return _tokenAsks[tokenId];
+    }
+
+    function bidSharesForToken(uint256 tokenId)
+        public
+        view
+        override
+        returns (BidShares memory)
+    {
+        return _bidShares[tokenId];
+    }
+
+    
+
+    constructor() public {
+        _owner = msg.sender;
     }
 
     /**
-     * @notice see IMedia
+     * @notice Sets the media contract address. This address is the only permitted address that
+     * can call the mutable functions. This method can only be called once.
      */
-    function mintWithSig(
-        address creator,
-        MediaData memory data,
-        IMarket.BidShares memory bidShares,
-        EIP712Signature memory sig
-    ) public override nonReentrant {
+    function configure(address mediaContractAddress) external override {
+        require(msg.sender == _owner, "Market: Only owner");
+        require(mediaContract == address(0), "Market: Already configured");
         require(
-            sig.deadline == 0 || sig.deadline >= block.timestamp,
-            "Media: mintWithSig expired"
+            mediaContractAddress != address(0),
+            "Market: cannot set media contract as zero address"
         );
 
-        bytes32 domainSeparator = _calculateDomainSeparator();
+        mediaContract = mediaContractAddress;
+    }
 
-        bytes32 digest =
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    domainSeparator,
-                    keccak256(
-                        abi.encode(
-                            MINT_WITH_SIG_TYPEHASH,
-                            data.contentHash,
-                            data.metadataHash,
-                            bidShares.creator.value,
-                            mintWithSigNonces[creator]++,
-                            sig.deadline
-                        )
-                    )
-                )
-            );
+    
 
-        address recoveredAddress = ecrecover(digest, sig.v, sig.r, sig.s);
-
+    /**
+     * @notice Sets the ask on a particular media. If the ask cannot be evenly split into the media's
+     * bid shares, this reverts.
+     */
+    function setAsk(uint256 tokenId, uint256  ask)
+        public
+        override
+        onlyMediaCaller
+    {
         require(
-            recoveredAddress != address(0) && creator == recoveredAddress,
-            "Media: Signature invalid"
+            isValidBid(tokenId, ask),
+            "Market: Ask invalid for share splitting"
         );
 
-        _mintForCreator(recoveredAddress, data, bidShares);
+        _tokenAsks[tokenId] = ask;
+        emit AskCreated(tokenId, ask);
     }
 
-    /**
-     * @notice see IMedia
-     */
-    function auctionTransfer(uint256 tokenId, address recipient)
-        external
-        override
+    // get All token information
+
+    function getAllTokens() public view returns(TokenAskInfo[] memory) 
     {
-        require(msg.sender == marketContract, "Media: only market contract");
-        previousTokenOwners[tokenId] = ownerOf(tokenId);
-        _safeTransfer(ownerOf(tokenId), recipient, tokenId, "");
+        uint256 tokenCount = Media(mediaContract).getTokenCount();
+        TokenAskInfo[] memory result = new TokenAskInfo[](tokenCount);        
+        for (uint i = 0; i < tokenCount; i++) {
+            result[i] = TokenAskInfo ({
+                tokenId : i, 
+                askValue : _tokenAsks[i], 
+                tokenOwner : IERC721(mediaContract).ownerOf(i)
+            });
+        }
+        return result;
+    }
+
+
+    /**
+     * @notice removes an ask for a token and emits an AskRemoved event
+     */
+    function removeAsk(uint256 tokenId) external override onlyMediaCaller {
+        emit AskRemoved(tokenId, _tokenAsks[tokenId]);
+        delete _tokenAsks[tokenId];
     }
 
     /**
-     * @notice see IMedia
+     * @notice Sets the bid on a particular media for a bidder. The token being used to bid
+     * is transferred from the spender to this contract to be held until removed or accepted.
+     * If another bid already exists for the bidder, it is refunded.
      */
-    function setAsk(uint256 tokenId, uint256 memory ask)
-        public
-        override
-        nonReentrant
-        onlyApprovedOrOwner(msg.sender, tokenId)
-    {
-        IMarket(marketContract).setAsk(tokenId, ask);
-    }
-
-    /**
-     * @notice see IMedia
-     */
-    function removeAsk(uint256 tokenId)
-        external
-        override
-        nonReentrant
-        onlyApprovedOrOwner(msg.sender, tokenId)
-    {
-        IMarket(marketContract).removeAsk(tokenId);
-    }
-
-    /**
-     * @notice see IMedia
-     */
-    function setBid(uint256 tokenId, IMarket.Bid memory bid)
-        public
-        override
-        nonReentrant
-        onlyExistingToken(tokenId)
-        payable
-    {
-        require(msg.value == bid.amount, "value must equal to amount");
-        require(msg.sender == bid.bidder, "Market: Bidder must be msg sender");
-        IMarket(marketContract).setBid{value : msg.value } (tokenId, bid, msg.sender);
-    }
-
-    /**
-     * @notice see IMedia
-     */
-    function removeBid(uint256 tokenId)
-        external
-        override
-        nonReentrant
-        onlyTokenCreated(tokenId)
-    {
-        IMarket(marketContract).removeBid(tokenId, msg.sender);
-    }
-
-    /**
-     * @notice see IMedia
-     */
-    function acceptBid(uint256 tokenId, IMarket.Bid memory bid)
-        public
-        override
-        nonReentrant
-        onlyApprovedOrOwner(msg.sender, tokenId)
-    {
-        IMarket(marketContract).acceptBid(tokenId, bid);
-    }
-
-    /**
-     * @notice Burn a token.
-     * @dev Only callable if the media owner is also the creator.
-     */
-    function burn(uint256 tokenId)
-        public
-        override
-        nonReentrant
-        onlyExistingToken(tokenId)
-        onlyApprovedOrOwner(msg.sender, tokenId)
-    {
-        address owner = ownerOf(tokenId);
-
-        require(
-            tokenCreators[tokenId] == owner,
-            "Media: owner is not creator of media"
-        );
-
-        _burn(tokenId);
-    }
-
-    /**
-     * @notice Revoke the approvals for a token. The provided `approve` function is not sufficient
-     * for this protocol, as it does not allow an approved address to revoke it's own approval.
-     * In instances where a 3rd party is interacting on a user's behalf via `permit`, they should
-     * revoke their approval once their task is complete as a best practice.
-     */
-    function revokeApproval(uint256 tokenId) external override nonReentrant {
-        require(
-            msg.sender == getApproved(tokenId),
-            "Media: caller not approved address"
-        );
-        _approve(address(0), tokenId);
-    }
-
-    /**
-     * @notice see IMedia
-     * @dev only callable by approved or owner
-     */
-    function updateTokenURI(uint256 tokenId, string calldata tokenURI)
-        external
-        override
-        nonReentrant
-        onlyApprovedOrOwner(msg.sender, tokenId)
-        onlyTokenWithContentHash(tokenId)
-        onlyValidURI(tokenURI)
-    {
-        _setTokenURI(tokenId, tokenURI);
-        emit TokenURIUpdated(tokenId, msg.sender, tokenURI);
-    }
-
-    /**
-     * @notice see IMedia
-     * @dev only callable by approved or owner
-     */
-    function updateTokenMetadataURI(
+    function setBid(
         uint256 tokenId,
-        string calldata metadataURI
-    )
-        external
-        override
-        nonReentrant
-        onlyApprovedOrOwner(msg.sender, tokenId)
-        onlyTokenWithMetadataHash(tokenId)
-        onlyValidURI(metadataURI)
-    {
-        _setTokenMetadataURI(tokenId, metadataURI);
-        emit TokenMetadataURIUpdated(tokenId, msg.sender, metadataURI);
-    }
-
-    /**
-     * @notice See IMedia
-     * @dev This method is loosely based on the permit for ERC-20 tokens in  EIP-2612, but modified
-     * for ERC-721.
-     */
-    function permit(
-        address spender,
-        uint256 tokenId,
-        EIP712Signature memory sig
-    ) public override nonReentrant onlyExistingToken(tokenId) {
+        Bid memory bid,
+        address spender
+    ) payable public override onlyMediaCaller {
+        BidShares memory bidShares = _bidShares[tokenId];
         require(
-            sig.deadline == 0 || sig.deadline >= block.timestamp,
-            "Media: Permit expired"
+            bidShares.creator.value.add(bid.sellOnShare.value) <=
+                uint256(100).mul(Decimal.BASE),
+            "Market: Sell on fee invalid for share splitting"
         );
-        require(spender != address(0), "Media: spender cannot be 0x0");
-        bytes32 domainSeparator = _calculateDomainSeparator();
-
-        bytes32 digest =
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    domainSeparator,
-                    keccak256(
-                        abi.encode(
-                            PERMIT_TYPEHASH,
-                            spender,
-                            tokenId,
-                            permitNonces[ownerOf(tokenId)][tokenId]++,
-                            sig.deadline
-                        )
-                    )
-                )
-            );
-
-        address recoveredAddress = ecrecover(digest, sig.v, sig.r, sig.s);
-
+        require(bid.bidder != address(0), "Market: bidder cannot be 0 address");
+        require(bid.amount != 0, "Market: cannot bid amount of 0");
+        // require(
+        //     bid.currency != address(0),
+        //     "Market: bid currency cannot be 0 address"
+        // );
         require(
-            recoveredAddress != address(0) &&
-                ownerOf(tokenId) == recoveredAddress,
-            "Media: Signature invalid"
+            bid.recipient != address(0),
+            "Market: bid recipient cannot be 0 address"
         );
 
-        _approve(spender, tokenId);
-    }
+        Bid storage existingBid = _tokenBidders[tokenId][bid.bidder];
 
-    /* *****************
-     * Private Functions
-     * *****************
-     */
-
-    /**
-     * @notice Creates a new token for `creator`. Its token ID will be automatically
-     * assigned (and available on the emitted {IERC721-Transfer} event), and the token
-     * URI autogenerated based on the base URI passed at construction.
-     *
-     * See {ERC721-_safeMint}.
-     *
-     * On mint, also set the sha256 hashes of the content and its metadata for integrity
-     * checks, along with the initial URIs to point to the content and metadata. Attribute
-     * the token ID to the creator, mark the content hash as used, and set the bid shares for
-     * the media's market.
-     *
-     * Note that although the content hash must be unique for future mints to prevent duplicate media,
-     * metadata has no such requirement.
-     */
-    function _mintForCreator(
-        address creator,
-        MediaData memory data,
-        IMarket.BidShares memory bidShares
-    ) internal onlyValidURI(data.tokenURI) onlyValidURI(data.metadataURI) {
-        require(data.contentHash != 0, "Media: content hash must be non-zero");
-        require(
-            _contentHashes[data.contentHash] == false,
-            "Media: a token has already been created with this content hash"
-        );
-        require(
-            data.metadataHash != 0,
-            "Media: metadata hash must be non-zero"
-        );
-
-        uint256 tokenId = _tokenIdTracker.current();
-
-        _safeMint(creator, tokenId);
-        _tokenIdTracker.increment();
-        _setTokenContentHash(tokenId, data.contentHash);
-        _setTokenMetadataHash(tokenId, data.metadataHash);
-        _setTokenMetadataURI(tokenId, data.metadataURI);
-        _setTokenURI(tokenId, data.tokenURI);
-        _creatorTokens[creator].add(tokenId);
-        _contentHashes[data.contentHash] = true;
-
-        tokenCreators[tokenId] = creator;
-        previousTokenOwners[tokenId] = creator;
-        IMarket(marketContract).setBidShares(tokenId, bidShares);
-    }
-
-    function _setTokenContentHash(uint256 tokenId, bytes32 contentHash)
-        internal
-        virtual
-        onlyExistingToken(tokenId)
-    {
-        tokenContentHashes[tokenId] = contentHash;
-    }
-
-    function _setTokenMetadataHash(uint256 tokenId, bytes32 metadataHash)
-        internal
-        virtual
-        onlyExistingToken(tokenId)
-    {
-        tokenMetadataHashes[tokenId] = metadataHash;
-    }
-
-    function _setTokenMetadataURI(uint256 tokenId, string memory metadataURI)
-        internal
-        virtual
-        onlyExistingToken(tokenId)
-    {
-        _tokenMetadataURIs[tokenId] = metadataURI;
-    }
-
-    /**
-     * @notice Destroys `tokenId`.
-     * @dev We modify the OZ _burn implementation to
-     * maintain metadata and to remove the
-     * previous token owner from the piece
-     */
-    function _burn(uint256 tokenId) internal override {
-        string memory tokenURI = _tokenURIs[tokenId];
-
-        super._burn(tokenId);
-
-        if (bytes(tokenURI).length != 0) {
-            _tokenURIs[tokenId] = tokenURI;
+        // If there is an existing bid, refund it before continuing
+        if (existingBid.amount > 0) {
+            removeBid(tokenId, bid.bidder);
         }
 
-        delete previousTokenOwners[tokenId];
-    }
+        // IERC20 token = IERC20(bid.currency);
 
-    /**
-     * @notice transfer a token and remove the ask for it.
-     */
-    function _transfer(
-        address from,
-        address to,
-        uint256 tokenId
-    ) internal override {
-        IMarket(marketContract).removeAsk(tokenId);
+        // We must check the balance that was actually transferred to the market,
+        // as some tokens impose a transfer fee and would not actually transfer the
+        // full amount to the market, resulting in locked funds for refunds & bid acceptance
+        // uint256 beforeBalance = token.balanceOf(address(this));
+        // token.safeTransferFrom(spender, address(this), bid.amount);
+        // uint256 afterBalance = token.balanceOf(address(this));
+        _tokenBidders[tokenId][bid.bidder] = Bid(
+            // afterBalance.sub(beforeBalance),
+            msg.value, 
+            // bid.currency,
+            bid.bidder,
+            bid.recipient,
+            bid.sellOnShare
+        );
+        emit BidCreated(tokenId, bid);
 
-        super._transfer(from, to, tokenId);
-    }
-
-    /**
-     * @dev Calculates EIP712 DOMAIN_SEPARATOR based on the current contract and chain ID.
-     */
-    function _calculateDomainSeparator() internal view returns (bytes32) {
-        uint256 chainID;
-        /* solium-disable-next-line */
-        assembly {
-            chainID := chainid()
+        // If a bid meets the criteria for an ask, automatically accept the bid.
+        // If no ask is set or the bid does not meet the requirements, ignore.
+        if (
+            // _tokenAsks[tokenId].currency != address(0) &&
+            // bid.currency == _tokenAsks[tokenId].currency &&
+            _tokenAsks[tokenId]> 0 && 
+            bid.amount >= _tokenAsks[tokenId]
+        ) {
+            // Finalize exchange
+            _finalizeNFTTransfer(tokenId, bid.bidder);
         }
+    }
 
+    function isValidBid(uint256 tokenId, uint256 bidAmount)
+        public
+        view
+        override
+        returns (bool)
+    {
+        BidShares memory bidShares = bidSharesForToken(tokenId);
+        require(
+            isValidBidShares(bidShares),
+            "Market: Invalid bid shares for token"
+        );
+        return        bidAmount != 0;
+    }
+
+    /**
+     * @notice Validates that the provided bid shares sum to 100
+     */
+    function isValidBidShares(BidShares memory bidShares)
+        public
+        pure
+        override
+        returns (bool)
+    {
         return
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-                    ),
-                    keccak256(bytes("Zora")),
-                    keccak256(bytes("1")),
-                    chainID,
-                    address(this)
-                )
-            );
+            bidShares.creator.value.add(bidShares.owner.value).add(
+                bidShares.prevOwner.value
+            ) == uint256(100).mul(Decimal.BASE);
+    }
+
+    /**
+     * @notice Removes the bid on a particular media for a bidder. The bid amount
+     * is transferred from this contract to the bidder, if they have a bid placed.
+     */
+    function removeBid(uint256 tokenId, address bidder)
+        public
+        override
+        onlyMediaCaller
+    {
+        Bid storage bid = _tokenBidders[tokenId][bidder];
+        uint256 bidAmount = bid.amount;
+        // address bidCurrency = bid.currency;
+        require(bid.amount > 0, "Market: cannot remove bid amount of 0");
+
+        // IERC20 token = IERC20(bidCurrency);
+
+        emit BidRemoved(tokenId, bid);
+        delete _tokenBidders[tokenId][bidder];
+        payable(bidder).transfer(bidAmount);
+        // token.safeTransfer(bidder, bidAmount);
+    }
+
+    /**
+     * @notice Accepts a bid from a particular bidder. Can only be called by the media contract.
+     * See {_finalizeNFTTransfer}
+     * Provided bid must match a bid in storage. This is to prevent a race condition
+     * where a bid may change while the acceptBid call is in transit.
+     * A bid cannot be accepted if it cannot be split equally into its shareholders.
+     * This should only revert in rare instances (example, a low bid with a zero-decimal token),
+     * but is necessary to ensure fairness to all shareholders.
+     */
+    function acceptBid(uint256 tokenId, Bid calldata expectedBid)
+        external
+        override
+        onlyMediaCaller
+    {
+        Bid memory bid = _tokenBidders[tokenId][expectedBid.bidder];
+        require(bid.amount > 0, "Market: cannot accept bid of 0");
+        require(
+            bid.amount == expectedBid.amount &&
+                // bid.currency == expectedBid.currency &&
+                bid.sellOnShare.value == expectedBid.sellOnShare.value &&
+                bid.recipient == expectedBid.recipient,
+            "Market: Unexpected bid found."
+        );
+        require(
+            isValidBid(tokenId, bid.amount),
+            "Market: Bid invalid for share splitting"
+        );
+
+        _finalizeNFTTransfer(tokenId, bid.bidder);
+    }
+
+    /**
+     * @notice return a % of the specified amount. This function is used to split a bid into shares
+     * for a media's shareholders.
+     */
+    function splitShare(Decimal.D256 memory sharePercentage, uint256 amount)
+        public
+        pure
+        override
+        returns (uint256)
+    {
+        return Decimal.mul(amount, sharePercentage).div(100);
+    }
+
+    /**
+     * @notice Sets bid shares for a particular tokenId. These bid shares must
+     * sum to 100.
+     */
+    function setBidShares(uint256 tokenId, BidShares memory bidShares)
+        public
+        override
+        onlyMediaCaller
+    {
+        require(
+            isValidBidShares(bidShares),
+            "Market: Invalid bid shares, must sum to 100"
+        );
+        _bidShares[tokenId] = bidShares;
+        emit BidShareUpdated(tokenId, bidShares);
+    }
+
+    /**
+     * @notice Given a token ID and a bidder, this method transfers the value of
+     * the bid to the shareholders. It also transfers the ownership of the media
+     * to the bid recipient. Finally, it removes the accepted bid and the current ask.
+     */
+    function _finalizeNFTTransfer(uint256 tokenId, address bidder) private {
+        Bid memory bid = _tokenBidders[tokenId][bidder];
+        BidShares storage bidShares = _bidShares[tokenId];
+
+        // IERC20 token = IERC20(bid.currency);
+
+        uint256  ownerAmount;
+        uint256  creatorAmount;
+
+        ownerAmount = splitShare(bidShares.owner, bid.amount);
+        creatorAmount = splitShare(bidShares.creator, bid.amount);
+
+
+        // Transfer bid share to owner of media
+        // token.safeTransfer(
+        //     IERC721(mediaContract).ownerOf(tokenId),
+        //     splitShare(bidShares.owner, bid.amount)
+        // );
+        // // Transfer bid share to creator of media
+        // token.safeTransfer(
+        //     Media(mediaContract).tokenCreators(tokenId),
+        //     splitShare(bidShares.creator, bid.amount)
+        // );
+        // // Transfer bid share to previous owner of media (if applicable)
+        // token.safeTransfer(
+        //     Media(mediaContract).previousTokenOwners(tokenId),
+        //     splitShare(bidShares.prevOwner, bid.amount)
+        // );
+
+        payable(IERC721(mediaContract).ownerOf(tokenId)).transfer(ownerAmount);
+        payable(Media(mediaContract).tokenCreators(tokenId)).transfer(creatorAmount);
+
+        // Transfer media to bid recipient
+        Media(mediaContract).auctionTransfer(tokenId, bid.recipient);
+
+        // Calculate the bid share for the new owner,
+        // equal to 100 - creatorShare - sellOnShare
+        bidShares.owner = Decimal.D256(
+            uint256(100)
+                .mul(Decimal.BASE)
+                .sub(_bidShares[tokenId].creator.value)
+                .sub(bid.sellOnShare.value)
+        );
+        // Set the previous owner share to the accepted bid's sell-on fee
+        bidShares.prevOwner = bid.sellOnShare;
+
+        // Remove the accepted bid
+        delete _tokenBidders[tokenId][bidder];
+
+        emit BidShareUpdated(tokenId, bidShares);
+        emit BidFinalized(tokenId, bid);
     }
 }

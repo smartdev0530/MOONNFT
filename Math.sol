@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 pragma solidity ^0.6.0;
+import {SafeMath} from "@openzeppelin/contracts@3.2.0/math/SafeMath.sol";
 
 /**
  * @dev Standard math utilities missing in the Solidity language.
@@ -9,6 +10,7 @@ library Math {
     /**
      * @dev Returns the largest of two numbers.
      */
+     using SafeMath for uint256;
     function max(uint256 a, uint256 b) internal pure returns (uint256) {
         return a >= b ? a : b;
     }
@@ -27,5 +29,16 @@ library Math {
     function average(uint256 a, uint256 b) internal pure returns (uint256) {
         // (a + b) / 2 can overflow, so we distribute
         return (a / 2) + (b / 2) + ((a % 2 + b % 2) / 2);
+    }
+    function getPartial(
+        uint256 target,
+        uint256 numerator,
+        uint256 denominator
+    )
+        internal
+        pure
+        returns (uint256)
+    {
+        return target.mul(numerator).div(denominator);
     }
 }

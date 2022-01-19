@@ -3,7 +3,7 @@
 pragma solidity 0.6.8;
 pragma experimental ABIEncoderV2;
 
-import {Decimal} from "../Decimal.sol";
+import {Decimal} from "./Decimal.sol";
 
 /**
  * @title Interface for Zora Protocol's Market
@@ -53,7 +53,7 @@ interface IMarket {
     function currentAskForToken(uint256 tokenId)
         external
         view
-        returns (uint256 memory);
+        returns (uint256);
 
     function bidSharesForToken(uint256 tokenId)
         external
@@ -80,7 +80,7 @@ interface IMarket {
     function setBidShares(uint256 tokenId, BidShares calldata bidShares)
         external;
 
-    function setAsk(uint256 tokenId, uint256 calldata ask) external;
+    function setAsk(uint256 tokenId, uint256 ask) external;
 
     function removeAsk(uint256 tokenId) external;
 
@@ -88,7 +88,7 @@ interface IMarket {
         uint256 tokenId,
         Bid calldata bid,
         address spender
-    ) external;
+    ) payable external;
 
     function removeBid(uint256 tokenId, address bidder) external;
 

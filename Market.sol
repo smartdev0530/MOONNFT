@@ -3,13 +3,15 @@
 pragma solidity 0.6.8;
 pragma experimental ABIEncoderV2;
 
-import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts@3.2.0/introspection/IERC165.sol";
+import "@openzeppelin/contracts@3.2.0/utils/Address.sol";
+import {SafeMath} from "@openzeppelin/contracts@3.2.0/math/SafeMath.sol";
+import {IERC721} from "@openzeppelin/contracts@3.2.0/token/ERC721/IERC721.sol";
+import {IERC20} from "@openzeppelin/contracts@3.2.0/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts@3.2.0/token/ERC20/SafeERC20.sol";
 import {Decimal} from "./Decimal.sol";
 import {Media} from "./Media.sol";
-import {IMarket} from "./interfaces/IMarket.sol";
+import {IMarket} from "./IMarket.sol";
 
 /**
  * @title A Market for pieces of media
@@ -33,10 +35,16 @@ contract Market is IMarket {
     mapping(uint256 => mapping(address => Bid)) private _tokenBidders;
 
     // // Mapping from token to the bid shares for the token
-    // mapping(uint256 => BidShares) private _bidShares;
+    mapping(uint256 => BidShares) private _bidShares;
 
     // Mapping from token to the current ask for the token
     mapping(uint256 => uint256) private _tokenAsks;
+
+    struct TokenAskInfo {
+        uint256 tokenId;
+        uint256 askValue; 
+        address tokenOwner;
+    }
 
     /* *********
      * Modifiers
@@ -68,19 +76,19 @@ contract Market is IMarket {
         external
         view
         override
-        returns (uint256 memory)
+        returns (uint256 )
     {
         return _tokenAsks[tokenId];
     }
 
-    // function bidSharesForToken(uint256 tokenId)
-    //     public
-    //     view
-    //     override
-    //     returns (BidShares memory)
-    // {
-    //     return _bidShares[tokenId];
-    // }
+    function bidSharesForToken(uint256 tokenId)
+        public
+        view
+        override
+        returns (BidShares memory)
+    {
+        return _bidShares[tokenId];
+    }
 
     
 
@@ -109,7 +117,7 @@ contract Market is IMarket {
      * @notice Sets the ask on a particular media. If the ask cannot be evenly split into the media's
      * bid shares, this reverts.
      */
-    function setAsk(uint256 tokenId, uint256 memory ask)
+    function setAsk(uint256 tokenId, uint256  ask)
         public
         override
         onlyMediaCaller
@@ -122,6 +130,23 @@ contract Market is IMarket {
         _tokenAsks[tokenId] = ask;
         emit AskCreated(tokenId, ask);
     }
+
+    // get All token information
+
+    function getAllTokens() public view returns(TokenAskInfo[] memory) 
+    {
+        uint256 tokenCount = Media(mediaContract).getTokenCount();
+        TokenAskInfo[] memory result = new TokenAskInfo[](tokenCount);        
+        for (uint i = 0; i < tokenCount; i++) {
+            result[i] = TokenAskInfo ({
+                tokenId : i, 
+                askValue : _tokenAsks[i], 
+                tokenOwner : IERC721(mediaContract).ownerOf(i)
+            });
+        }
+        return result;
+    }
+
 
     /**
      * @notice removes an ask for a token and emits an AskRemoved event
@@ -196,6 +221,35 @@ contract Market is IMarket {
         }
     }
 
+    function isValidBid(uint256 tokenId, uint256 bidAmount)
+        public
+        view
+        override
+        returns (bool)
+    {
+        BidShares memory bidShares = bidSharesForToken(tokenId);
+        require(
+            isValidBidShares(bidShares),
+            "Market: Invalid bid shares for token"
+        );
+        return        bidAmount != 0;
+    }
+
+    /**
+     * @notice Validates that the provided bid shares sum to 100
+     */
+    function isValidBidShares(BidShares memory bidShares)
+        public
+        pure
+        override
+        returns (bool)
+    {
+        return
+            bidShares.creator.value.add(bidShares.owner.value).add(
+                bidShares.prevOwner.value
+            ) == uint256(100).mul(Decimal.BASE);
+    }
+
     /**
      * @notice Removes the bid on a particular media for a bidder. The bid amount
      * is transferred from this contract to the bidder, if they have a bid placed.
@@ -250,6 +304,36 @@ contract Market is IMarket {
     }
 
     /**
+     * @notice return a % of the specified amount. This function is used to split a bid into shares
+     * for a media's shareholders.
+     */
+    function splitShare(Decimal.D256 memory sharePercentage, uint256 amount)
+        public
+        pure
+        override
+        returns (uint256)
+    {
+        return Decimal.mul(amount, sharePercentage).div(100);
+    }
+
+    /**
+     * @notice Sets bid shares for a particular tokenId. These bid shares must
+     * sum to 100.
+     */
+    function setBidShares(uint256 tokenId, BidShares memory bidShares)
+        public
+        override
+        onlyMediaCaller
+    {
+        require(
+            isValidBidShares(bidShares),
+            "Market: Invalid bid shares, must sum to 100"
+        );
+        _bidShares[tokenId] = bidShares;
+        emit BidShareUpdated(tokenId, bidShares);
+    }
+
+    /**
      * @notice Given a token ID and a bidder, this method transfers the value of
      * the bid to the shareholders. It also transfers the ownership of the media
      * to the bid recipient. Finally, it removes the accepted bid and the current ask.
@@ -260,8 +344,8 @@ contract Market is IMarket {
 
         // IERC20 token = IERC20(bid.currency);
 
-        uint256 memory ownerAmount;
-        uint256 memory creatorAmount;
+        uint256  ownerAmount;
+        uint256  creatorAmount;
 
         ownerAmount = splitShare(bidShares.owner, bid.amount);
         creatorAmount = splitShare(bidShares.creator, bid.amount);
